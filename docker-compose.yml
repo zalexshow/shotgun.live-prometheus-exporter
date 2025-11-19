@@ -1,0 +1,70 @@
+services:
+  shotgun-exporter:
+    build: .
+    container_name: shotgun-exporter
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    env_file:
+      - .env
+    environment:
+      - SHOTGUN_API_KEY=${SHOTGUN_API_KEY}
+      - SHOTGUN_ORGANIZER_ID=${SHOTGUN_ORGANIZER_ID}
+      - EXPORTER_PORT=9090
+      - SCRAPE_INTERVAL=${SCRAPE_INTERVAL:-300}
+      - INCLUDE_COHOSTED_EVENTS=true
+    volumes:
+      - ./data:/data
+    networks:
+      - monitoring
+
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:latest
+    container_name: victoriametrics
+    restart: unless-stopped
+    ports:
+      - "8428:8428"
+    volumes:
+      - ./data/victoria-metrics:/victoria-metrics-data
+    command:
+      - '--storageDataPath=/victoria-metrics-data'
+      - '--retentionPeriod=5y'  # Rétention de 5 ans
+      - '--httpListenAddr=:8428'
+    networks:
+      - monitoring
+    depends_on:
+      - shotgun-exporter
+
+  vmagent:
+    image: victoriametrics/vmagent:latest
+    container_name: vmagent
+    restart: unless-stopped
+    volumes:
+      - ./victoriametrics.yml:/etc/vmagent/scrape.yml
+    command:
+      - '--promscrape.config=/etc/vmagent/scrape.yml'
+      - '--remoteWrite.url=http://victoriametrics:8428/api/v1/write'
+    networks:
+      - monitoring
+    depends_on:
+      - victoriametrics
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./grafana-provisioning:/etc/grafana/provisioning
+    networks:
+      - monitoring
+    depends_on:
+      - victoriametrics
+
+networks:
+  monitoring:
+    driver: bridge
