@@ -4,7 +4,7 @@ services:
     container_name: shotgun-exporter
     restart: unless-stopped
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     env_file:
       - .env
     environment:
@@ -23,7 +23,7 @@ services:
     container_name: victoriametrics
     restart: unless-stopped
     ports:
-      - "8428:8428"
+      - "127.0.0.1:8428:8428"
     volumes:
       - ./data/victoria-metrics:/victoria-metrics-data
     command:
@@ -54,7 +54,7 @@ services:
     container_name: grafana
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_USERS_ALLOW_SIGN_UP=false
