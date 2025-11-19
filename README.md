@@ -40,6 +40,18 @@ docker compose up -d
 - Grafana: http://localhost:3000 (admin/admin)
 - VictoriaMetrics: http://localhost:8428
 
+## Image Docker
+
+Une image pré-construite est disponible :
+
+```bash
+docker pull ghcr.io/zalexshow/shotgun.live-prometheus-exporter:main
+```
+
+Vous pouvez remplacer `build: .` par
+`image: ghcr.io/zalexshow/shotgun.live-prometheus-exporter:main` dans le
+service `shotgun-exporter` si vous ne souhaitez pas construire l'image en local.
+
 ## Métriques
 
 - `shotgun_tickets_sold_total`: tickets vendus (labels: event, ticket_title, channel)
