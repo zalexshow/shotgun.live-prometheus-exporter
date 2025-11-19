@@ -664,6 +664,15 @@ class ShotgunExporter:
 
         start_http_server(EXPORTER_PORT)
 
+        # First run: always fetch events
+        logger.info("Initial metrics collection (forcing events fetch)...")
+        try:
+            events = self.fetch_events()
+            self.update_event_metrics(events)
+            self._mark_events_fetched()
+        except Exception as e:
+            logger.error(f"Error during initial events fetch: {e}", exc_info=True)
+
         while True:
             try:
                 self.collect_metrics()
