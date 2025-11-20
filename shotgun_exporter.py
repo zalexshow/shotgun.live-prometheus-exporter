@@ -27,6 +27,7 @@ SCRAPE_INTERVAL = int(os.getenv('SCRAPE_INTERVAL', '60'))
 INCLUDE_COHOSTED_EVENTS = os.getenv('INCLUDE_COHOSTED_EVENTS', 'false').lower() == 'true'
 FULL_SCAN_INTERVAL = int(os.getenv('FULL_SCAN_INTERVAL', '86400'))
 EVENTS_FETCH_INTERVAL = int(os.getenv('EVENTS_FETCH_INTERVAL', '3600'))
+RECENT_SCAN_INTERVAL = int(os.getenv('RECENT_SCAN_INTERVAL', '3600'))
 
 BASE_URL = "https://smartboard-api.shotgun.live/api/shotgun"
 TICKETS_URL = f"{BASE_URL}/tickets/sold"
@@ -319,7 +320,39 @@ class ShotgunExporter:
         except Exception as e:
             logger.error(f"Error writing events fetch timestamp: {e}")
 
-    def fetch_all_tickets(self, full_scan: bool = False) -> List[Dict]:
+    def _should_do_recent_scan(self) -> bool:
+        try:
+            conn = sqlite3.connect(self.DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM exporter_state WHERE key = 'last_recent_scan'")
+            row = cursor.fetchone()
+            conn.close()
+
+            if not row:
+                return True
+
+            last_scan = datetime.fromisoformat(row[0])
+            time_since_scan = (datetime.now() - last_scan).total_seconds()
+            return time_since_scan >= RECENT_SCAN_INTERVAL
+        except Exception as e:
+            logger.warning(f"Error reading last recent scan time: {e}")
+            return True
+
+    def _mark_recent_scan_done(self):
+        try:
+            conn = sqlite3.connect(self.DB_FILE)
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+            cursor.execute('''
+                INSERT OR REPLACE INTO exporter_state (key, value, updated_at)
+                VALUES ('last_recent_scan', ?, ?)
+            ''', (now, now))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error writing recent scan timestamp: {e}")
+
+    def fetch_all_tickets(self, full_scan: bool = False, recent_only: bool = False) -> List[Dict]:
         all_tickets = []
 
         params = {
@@ -329,15 +362,17 @@ class ShotgunExporter:
 
         if INCLUDE_COHOSTED_EVENTS:
             params['include_cohosted_events'] = 'true'
-            scan_mode = "full scan" if full_scan else "incremental"
+
+        scan_mode = "recent scan (24h)" if recent_only else ("full scan" if full_scan else "incremental")
+        if INCLUDE_COHOSTED_EVENTS:
             logger.info(f"Fetching tickets ({scan_mode}, including co-hosted events)...")
         else:
-            scan_mode = "full scan" if full_scan else "incremental"
             logger.info(f"Fetching tickets ({scan_mode})...")
 
         page_count = 0
         seen_known_tickets = 0
         conn = sqlite3.connect(self.DB_FILE)
+        cutoff_time = datetime.now() - timedelta(hours=24)
 
         while True:
             try:
@@ -358,7 +393,27 @@ class ShotgunExporter:
                 total_results = pagination_info.get('totalResults', '?')
                 logger.info(f"Page {page_count}: {len(tickets)} tickets fetched (total: {len(all_tickets)}/{total_results})")
 
-                if not full_scan:
+                # For recent_only mode, stop when we hit tickets older than 24h
+                if recent_only:
+                    old_tickets_in_page = 0
+                    for ticket in tickets:
+                        created_at_str = ticket.get('ticket_created_at')
+                        if created_at_str:
+                            try:
+                                created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+                                if created_at.replace(tzinfo=None) < cutoff_time:
+                                    old_tickets_in_page += 1
+                            except:
+                                pass
+
+                    if old_tickets_in_page >= len(tickets) * 0.8:  # If 80% of page is >24h old
+                        logger.info(f"Recent scan: most tickets in page older than 24h, stopping pagination")
+                        conn.close()
+                        logger.info(f"Total: {len(all_tickets)} tickets fetched in {page_count} page(s)")
+                        return all_tickets
+
+                # For incremental mode, stop when all tickets in page are known
+                if not full_scan and not recent_only:
                     for ticket in tickets:
                         ticket_id = ticket.get('ticket_id')
                         if ticket_id and self._get_ticket_from_db(conn, ticket_id):
@@ -642,13 +697,22 @@ class ShotgunExporter:
                 logger.info(f"Skipping events fetch (next fetch in {EVENTS_FETCH_INTERVAL/3600:.1f} hours)")
 
             do_full_scan = self._should_do_full_scan()
-            all_tickets = self.fetch_all_tickets(full_scan=do_full_scan)
+            do_recent_scan = self._should_do_recent_scan()
 
-            self.process_new_tickets(all_tickets)
-
+            # Priority: full scan > recent scan > incremental
             if do_full_scan:
+                all_tickets = self.fetch_all_tickets(full_scan=True)
+                self.process_new_tickets(all_tickets)
                 self._mark_full_scan_done()
                 logger.info(f"Full scan completed, next full scan in {FULL_SCAN_INTERVAL/3600:.1f} hours")
+            elif do_recent_scan:
+                recent_tickets = self.fetch_all_tickets(recent_only=True)
+                self.process_new_tickets(recent_tickets)
+                self._mark_recent_scan_done()
+                logger.info(f"Recent scan completed, next recent scan in {RECENT_SCAN_INTERVAL/3600:.1f} hours")
+            else:
+                all_tickets = self.fetch_all_tickets(full_scan=False)
+                self.process_new_tickets(all_tickets)
 
             last_scrape_timestamp.set(time.time())
 

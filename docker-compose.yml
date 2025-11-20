@@ -13,6 +13,8 @@ services:
       - EXPORTER_PORT=9090
       - SCRAPE_INTERVAL=${SCRAPE_INTERVAL:-300}
       - INCLUDE_COHOSTED_EVENTS=true
+      - EVENTS_FETCH_INTERVAL=${EVENTS_FETCH_INTERVAL:-3600}
+      - RECENT_SCAN_INTERVAL=${RECENT_SCAN_INTERVAL:-3600}
     volumes:
       - ./data:/data
     networks:
