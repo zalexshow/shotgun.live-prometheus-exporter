@@ -229,32 +229,54 @@ class ShotgunExporter:
 
         logger.info("Counters restored from database")
 
-    def _make_request(self, url: str, params: Optional[Dict] = None) -> Optional[Dict]:
-        try:
-            full_params = {'key': SHOTGUN_API_KEY}
-            if params:
-                full_params.update(params)
+    def _make_request(self, url: str, params: Optional[Dict] = None, max_retries: int = 3) -> Optional[Dict]:
+        """Make HTTP request with retry logic for transient errors"""
+        for attempt in range(max_retries):
+            try:
+                full_params = {'key': SHOTGUN_API_KEY}
+                if params:
+                    full_params.update(params)
 
-            response = self.session.get(url, params=full_params, timeout=120)
+                response = self.session.get(url, params=full_params, timeout=120)
 
-            if response.status_code != 200:
-                logger.error(f"API error - Status: {response.status_code}")
-                logger.error(f"URL: {url}")
-                logger.error(f"Response: {response.text[:500]}")
+                if response.status_code != 200:
+                    logger.error(f"API error - Status: {response.status_code}")
+                    logger.error(f"URL: {url}")
+                    logger.error(f"Response: {response.text[:500]}")
 
-            response.raise_for_status()
+                response.raise_for_status()
 
-            api_requests_total.labels(endpoint=url.split('/')[-1], status='success').inc()
-            return response.json()
+                api_requests_total.labels(endpoint=url.split('/')[-1], status='success').inc()
+                return response.json()
 
-        except requests.exceptions.Timeout as e:
-            logger.error(f"Timeout during request to {url}: {e}")
-            api_requests_total.labels(endpoint=url.split('/')[-1], status='timeout').inc()
-            return None
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error during request to {url}: {e}")
-            api_requests_total.labels(endpoint=url.split('/')[-1], status='error').inc()
-            return None
+            except requests.exceptions.Timeout as e:
+                logger.warning(f"Timeout during request (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    logger.info(f"Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"Request failed after {max_retries} attempts (timeout)")
+                    api_requests_total.labels(endpoint=url.split('/')[-1], status='timeout').inc()
+                    return None
+
+            except requests.exceptions.RequestException as e:
+                # Retry on 5xx errors (server errors), but not on 4xx (client errors)
+                if hasattr(e, 'response') and e.response is not None:
+                    status_code = e.response.status_code
+                    if 500 <= status_code < 600:
+                        logger.warning(f"Server error {status_code} (attempt {attempt + 1}/{max_retries}): {e}")
+                        if attempt < max_retries - 1:
+                            wait_time = 2 ** attempt  # Exponential backoff
+                            logger.info(f"Retrying in {wait_time}s...")
+                            time.sleep(wait_time)
+                            continue
+
+                logger.error(f"Error during request: {e}")
+                api_requests_total.labels(endpoint=url.split('/')[-1], status='error').inc()
+                return None
+
+        return None
 
     def _should_do_full_scan(self) -> bool:
         try:
