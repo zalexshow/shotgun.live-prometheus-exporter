@@ -8,9 +8,11 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
+from threading import Thread
 import requests
 from prometheus_client import start_http_server, Gauge, Counter, Info
 from dotenv import load_dotenv
+from flask import Flask, jsonify
 import sentry_sdk
 from sentry_sdk.integrations.logging import LoggingIntegration
 
@@ -44,6 +46,7 @@ else:
 SHOTGUN_API_KEY = os.getenv('SHOTGUN_API_KEY')
 SHOTGUN_ORGANIZER_ID = os.getenv('SHOTGUN_ORGANIZER_ID')
 EXPORTER_PORT = int(os.getenv('EXPORTER_PORT', '9090'))
+API_PORT = int(os.getenv('API_PORT', '9091'))
 SCRAPE_INTERVAL = int(os.getenv('SCRAPE_INTERVAL', '60'))
 INCLUDE_COHOSTED_EVENTS = os.getenv('INCLUDE_COHOSTED_EVENTS', 'false').lower() == 'true'
 FULL_SCAN_INTERVAL = int(os.getenv('FULL_SCAN_INTERVAL', '86400'))
@@ -111,6 +114,10 @@ last_scrape_timestamp = Gauge(
     'shotgun_last_scrape_timestamp',
     'Timestamp of last successful scrape'
 )
+
+# Flask API for manual triggers
+app = Flask(__name__)
+exporter_instance = None
 
 
 class ShotgunExporter:
@@ -855,11 +862,209 @@ class ShotgunExporter:
             logger.info(f"Waiting {SCRAPE_INTERVAL} seconds before next collection...")
             time.sleep(SCRAPE_INTERVAL)
 
+    def trigger_full_scan(self):
+        """Manually trigger a full scan"""
+        logger.info("Manual full scan triggered via API")
+        try:
+            if SENTRY_DSN:
+                monitor_slug = 'shotgun-full-scan'
+                check_in_id = sentry_sdk.crons.capture_checkin(
+                    monitor_slug=monitor_slug,
+                    status=sentry_sdk.crons.MonitorStatus.IN_PROGRESS,
+                )
+
+            all_tickets = self.fetch_all_tickets(full_scan=True)
+            self.process_new_tickets(all_tickets)
+            self._mark_full_scan_done()
+
+            if SENTRY_DSN:
+                sentry_sdk.crons.capture_checkin(
+                    check_in_id=check_in_id,
+                    monitor_slug=monitor_slug,
+                    status=sentry_sdk.crons.MonitorStatus.OK,
+                )
+
+            logger.info("Manual full scan completed successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Error during manual full scan: {e}", exc_info=True)
+            if SENTRY_DSN:
+                sentry_sdk.crons.capture_checkin(
+                    check_in_id=check_in_id,
+                    monitor_slug=monitor_slug,
+                    status=sentry_sdk.crons.MonitorStatus.ERROR,
+                )
+            return False
+
+    def trigger_recent_scan(self):
+        """Manually trigger a recent scan (24h)"""
+        logger.info("Manual recent scan triggered via API")
+        try:
+            if SENTRY_DSN:
+                monitor_slug = 'shotgun-recent-scan'
+                check_in_id = sentry_sdk.crons.capture_checkin(
+                    monitor_slug=monitor_slug,
+                    status=sentry_sdk.crons.MonitorStatus.IN_PROGRESS,
+                )
+
+            recent_tickets = self.fetch_all_tickets(recent_only=True)
+            self.process_new_tickets(recent_tickets)
+            self._mark_recent_scan_done()
+
+            if SENTRY_DSN:
+                sentry_sdk.crons.capture_checkin(
+                    check_in_id=check_in_id,
+                    monitor_slug=monitor_slug,
+                    status=sentry_sdk.crons.MonitorStatus.OK,
+                )
+
+            logger.info("Manual recent scan completed successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Error during manual recent scan: {e}", exc_info=True)
+            if SENTRY_DSN:
+                sentry_sdk.crons.capture_checkin(
+                    check_in_id=check_in_id,
+                    monitor_slug=monitor_slug,
+                    status=sentry_sdk.crons.MonitorStatus.ERROR,
+                )
+            return False
+
+    def trigger_incremental_scan(self):
+        """Manually trigger an incremental scan"""
+        logger.info("Manual incremental scan triggered via API")
+        try:
+            all_tickets = self.fetch_all_tickets(full_scan=False)
+            self.process_new_tickets(all_tickets)
+            logger.info("Manual incremental scan completed successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Error during manual incremental scan: {e}", exc_info=True)
+            return False
+
+    def trigger_events_fetch(self):
+        """Manually trigger events fetch"""
+        logger.info("Manual events fetch triggered via API")
+        try:
+            if SENTRY_DSN:
+                monitor_slug = 'shotgun-events-fetch'
+                check_in_id = sentry_sdk.crons.capture_checkin(
+                    monitor_slug=monitor_slug,
+                    status=sentry_sdk.crons.MonitorStatus.IN_PROGRESS,
+                )
+
+            events = self.fetch_events()
+            self.update_event_metrics(events)
+            self._mark_events_fetched()
+
+            if SENTRY_DSN:
+                sentry_sdk.crons.capture_checkin(
+                    check_in_id=check_in_id,
+                    monitor_slug=monitor_slug,
+                    status=sentry_sdk.crons.MonitorStatus.OK,
+                )
+
+            logger.info("Manual events fetch completed successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Error during manual events fetch: {e}", exc_info=True)
+            if SENTRY_DSN:
+                sentry_sdk.crons.capture_checkin(
+                    check_in_id=check_in_id,
+                    monitor_slug=monitor_slug,
+                    status=sentry_sdk.crons.MonitorStatus.ERROR,
+                )
+            return False
+
+
+# Flask API endpoints
+@app.route('/trigger/full-scan', methods=['POST'])
+def api_trigger_full_scan():
+    """Endpoint to manually trigger a full scan"""
+    if exporter_instance is None:
+        return jsonify({'status': 'error', 'message': 'Exporter not initialized'}), 503
+
+    # Run in background thread to avoid blocking the request
+    thread = Thread(target=exporter_instance.trigger_full_scan)
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({
+        'status': 'success',
+        'message': 'Full scan triggered',
+        'scan_type': 'full'
+    })
+
+@app.route('/trigger/recent-scan', methods=['POST'])
+def api_trigger_recent_scan():
+    """Endpoint to manually trigger a recent scan (24h)"""
+    if exporter_instance is None:
+        return jsonify({'status': 'error', 'message': 'Exporter not initialized'}), 503
+
+    thread = Thread(target=exporter_instance.trigger_recent_scan)
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({
+        'status': 'success',
+        'message': 'Recent scan triggered',
+        'scan_type': 'recent'
+    })
+
+@app.route('/trigger/incremental', methods=['POST'])
+def api_trigger_incremental_scan():
+    """Endpoint to manually trigger an incremental scan"""
+    if exporter_instance is None:
+        return jsonify({'status': 'error', 'message': 'Exporter not initialized'}), 503
+
+    thread = Thread(target=exporter_instance.trigger_incremental_scan)
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({
+        'status': 'success',
+        'message': 'Incremental scan triggered',
+        'scan_type': 'incremental'
+    })
+
+@app.route('/trigger/events', methods=['POST'])
+def api_trigger_events_fetch():
+    """Endpoint to manually trigger events fetch"""
+    if exporter_instance is None:
+        return jsonify({'status': 'error', 'message': 'Exporter not initialized'}), 503
+
+    thread = Thread(target=exporter_instance.trigger_events_fetch)
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({
+        'status': 'success',
+        'message': 'Events fetch triggered',
+        'scan_type': 'events'
+    })
+
+@app.route('/health', methods=['GET'])
+def api_health():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'healthy',
+        'exporter_initialized': exporter_instance is not None
+    })
+
 
 def main():
+    global exporter_instance
+
     try:
-        exporter = ShotgunExporter()
-        exporter.run()
+        exporter_instance = ShotgunExporter()
+
+        # Start Flask API in background thread
+        api_thread = Thread(target=lambda: app.run(host='0.0.0.0', port=API_PORT, debug=False))
+        api_thread.daemon = True
+        api_thread.start()
+        logger.info(f"API server started on port {API_PORT}")
+
+        exporter_instance.run()
     except KeyboardInterrupt:
         logger.info("Stopping exporter...")
     except Exception as e:

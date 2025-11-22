@@ -5,12 +5,14 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:9090:9090"
+      - "127.0.0.1:9091:9091"
     env_file:
       - .env
     environment:
       - SHOTGUN_API_KEY=${SHOTGUN_API_KEY}
       - SHOTGUN_ORGANIZER_ID=${SHOTGUN_ORGANIZER_ID}
       - EXPORTER_PORT=9090
+      - API_PORT=9091
       - SCRAPE_INTERVAL=${SCRAPE_INTERVAL:-300}
       - INCLUDE_COHOSTED_EVENTS=true
       - EVENTS_FETCH_INTERVAL=${EVENTS_FETCH_INTERVAL:-3600}
