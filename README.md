@@ -37,6 +37,7 @@ docker compose up -d
 ```
 
 - Exporter: http://localhost:9090/metrics
+- API: http://localhost:9091 (voir section API ci-dessous)
 - Grafana: http://localhost:3000 (admin/admin)
 - VictoriaMetrics: http://localhost:8428
 
@@ -61,6 +62,70 @@ service `shotgun-exporter` si vous ne souhaitez pas construire l'image en local.
 - `shotgun_events_total`: événements par statut (active/past/cancelled)
 
 Le reste est visible sur `/metrics` une fois lancé.
+
+## API de déclenchement manuel
+
+L'exporter expose une API sur le port 9091 pour déclencher manuellement les différents types de scans. Utile lorsqu'un écart est détecté entre les métriques et la réalité.
+
+**Déclencher un scan complet (tous les billets) :**
+```bash
+curl -X POST http://localhost:9091/trigger/full-scan
+```
+
+**Déclencher un scan récent (billets des dernières 24h) :**
+```bash
+curl -X POST http://localhost:9091/trigger/recent-scan
+```
+
+**Déclencher un scan incrémental (jusqu'aux billets connus) :**
+```bash
+curl -X POST http://localhost:9091/trigger/incremental
+```
+
+**Déclencher une mise à jour des événements :**
+```bash
+curl -X POST http://localhost:9091/trigger/events
+```
+
+**Vérifier l'état de l'API :**
+```bash
+curl http://localhost:9091/health
+```
+
+Toutes les requêtes retournent immédiatement et le scan s'exécute en arrière-plan. Les logs montrent la progression en temps réel.
+
+## Ré-importation avec timestamps historiques
+
+Par défaut, les métriques sont enregistrées avec le timestamp du scrape. Si vous voulez réimporter des données avec leurs timestamps d'origine (date d'achat, date de scan, etc.), utilisez le script `reimport_event.py`.
+
+**Lister les événements disponibles :**
+```bash
+docker compose exec shotgun-exporter python reimport_event.py --list
+```
+
+**Tester la ré-importation (dry run) :**
+```bash
+docker compose exec shotgun-exporter python reimport_event.py --event 123456 --dry-run
+```
+
+**Ré-importer un événement :**
+```bash
+docker compose exec shotgun-exporter python reimport_event.py --event 123456
+```
+
+**Ré-importer tous les événements :**
+```bash
+docker compose exec shotgun-exporter python reimport_event.py --all
+```
+
+Cette opération :
+1. Supprime toutes les métriques existantes pour l'événement dans VictoriaMetrics
+2. Ré-insère les données avec les timestamps d'origine :
+   - Ventes : `ordered_at` (date d'achat)
+   - Remboursements : `cancelled_at` (date d'annulation)
+   - Scans : `ticket_redeemed_at` (date de scan à l'entrée)
+
+**Attention :** Cette opération supprime définitivement les données existantes. Utilisez `--dry-run` pour voir ce qui sera fait avant de l'exécuter.
 
 ## Données & persistance
 
