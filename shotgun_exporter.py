@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from pathlib import Path
-from threading import Thread
+from threading import Thread, Lock
 import requests
 from prometheus_client import start_http_server, Gauge, Counter, Info
 from dotenv import load_dotenv
@@ -131,6 +131,7 @@ class ShotgunExporter:
 
         self.session = requests.Session()
         self.session.params = {'key': SHOTGUN_API_KEY}
+        self._scan_lock = Lock()  # Prevent concurrent scans
 
         self._init_database()
 
@@ -736,10 +737,14 @@ class ShotgunExporter:
         events_total.labels(status='cancelled').set(cancelled_events)
 
     def collect_metrics(self):
-        logger.info("Starting metrics collection...")
-        start_time = time.time()
+        # Try to acquire lock, skip if another scan is running
+        if not self._scan_lock.acquire(blocking=False):
+            logger.warning("Skipping metrics collection: another scan is already running")
+            return
 
         try:
+            logger.info("Starting metrics collection...")
+            start_time = time.time()
             # Events fetch monitoring
             should_fetch_events = self._should_fetch_events()
             if should_fetch_events:
@@ -837,6 +842,8 @@ class ShotgunExporter:
 
         except Exception as e:
             logger.error(f"Error during metrics collection: {e}", exc_info=True)
+        finally:
+            self._scan_lock.release()
 
     def run(self):
         logger.info(f"Starting Shotgun exporter on port {EXPORTER_PORT}")
@@ -865,116 +872,132 @@ class ShotgunExporter:
     def trigger_full_scan(self):
         """Manually trigger a full scan"""
         logger.info("Manual full scan triggered via API")
-        try:
-            if SENTRY_DSN:
-                monitor_slug = 'shotgun-full-scan'
-                check_in_id = sentry_sdk.crons.capture_checkin(
-                    monitor_slug=monitor_slug,
-                    status=sentry_sdk.crons.MonitorStatus.IN_PROGRESS,
-                )
 
-            all_tickets = self.fetch_all_tickets(full_scan=True)
-            self.process_new_tickets(all_tickets)
-            self._mark_full_scan_done()
+        # Acquire lock, wait if needed
+        with self._scan_lock:
+            logger.info("Lock acquired, starting full scan...")
+            try:
+                if SENTRY_DSN:
+                    monitor_slug = 'shotgun-full-scan'
+                    check_in_id = sentry_sdk.crons.capture_checkin(
+                        monitor_slug=monitor_slug,
+                        status=sentry_sdk.crons.MonitorStatus.IN_PROGRESS,
+                    )
 
-            if SENTRY_DSN:
-                sentry_sdk.crons.capture_checkin(
-                    check_in_id=check_in_id,
-                    monitor_slug=monitor_slug,
-                    status=sentry_sdk.crons.MonitorStatus.OK,
-                )
+                all_tickets = self.fetch_all_tickets(full_scan=True)
+                self.process_new_tickets(all_tickets)
+                self._mark_full_scan_done()
 
-            logger.info("Manual full scan completed successfully")
-            return True
-        except Exception as e:
-            logger.error(f"Error during manual full scan: {e}", exc_info=True)
-            if SENTRY_DSN:
-                sentry_sdk.crons.capture_checkin(
-                    check_in_id=check_in_id,
-                    monitor_slug=monitor_slug,
-                    status=sentry_sdk.crons.MonitorStatus.ERROR,
-                )
-            return False
+                if SENTRY_DSN:
+                    sentry_sdk.crons.capture_checkin(
+                        check_in_id=check_in_id,
+                        monitor_slug=monitor_slug,
+                        status=sentry_sdk.crons.MonitorStatus.OK,
+                    )
+
+                logger.info("Manual full scan completed successfully")
+                return True
+            except Exception as e:
+                logger.error(f"Error during manual full scan: {e}", exc_info=True)
+                if SENTRY_DSN:
+                    sentry_sdk.crons.capture_checkin(
+                        check_in_id=check_in_id,
+                        monitor_slug=monitor_slug,
+                        status=sentry_sdk.crons.MonitorStatus.ERROR,
+                    )
+                return False
 
     def trigger_recent_scan(self):
         """Manually trigger a recent scan (24h)"""
         logger.info("Manual recent scan triggered via API")
-        try:
-            if SENTRY_DSN:
-                monitor_slug = 'shotgun-recent-scan'
-                check_in_id = sentry_sdk.crons.capture_checkin(
-                    monitor_slug=monitor_slug,
-                    status=sentry_sdk.crons.MonitorStatus.IN_PROGRESS,
-                )
 
-            recent_tickets = self.fetch_all_tickets(recent_only=True)
-            self.process_new_tickets(recent_tickets)
-            self._mark_recent_scan_done()
+        # Acquire lock, wait if needed
+        with self._scan_lock:
+            logger.info("Lock acquired, starting recent scan...")
+            try:
+                if SENTRY_DSN:
+                    monitor_slug = 'shotgun-recent-scan'
+                    check_in_id = sentry_sdk.crons.capture_checkin(
+                        monitor_slug=monitor_slug,
+                        status=sentry_sdk.crons.MonitorStatus.IN_PROGRESS,
+                    )
 
-            if SENTRY_DSN:
-                sentry_sdk.crons.capture_checkin(
-                    check_in_id=check_in_id,
-                    monitor_slug=monitor_slug,
-                    status=sentry_sdk.crons.MonitorStatus.OK,
-                )
+                recent_tickets = self.fetch_all_tickets(recent_only=True)
+                self.process_new_tickets(recent_tickets)
+                self._mark_recent_scan_done()
 
-            logger.info("Manual recent scan completed successfully")
-            return True
-        except Exception as e:
-            logger.error(f"Error during manual recent scan: {e}", exc_info=True)
-            if SENTRY_DSN:
-                sentry_sdk.crons.capture_checkin(
-                    check_in_id=check_in_id,
-                    monitor_slug=monitor_slug,
-                    status=sentry_sdk.crons.MonitorStatus.ERROR,
-                )
-            return False
+                if SENTRY_DSN:
+                    sentry_sdk.crons.capture_checkin(
+                        check_in_id=check_in_id,
+                        monitor_slug=monitor_slug,
+                        status=sentry_sdk.crons.MonitorStatus.OK,
+                    )
+
+                logger.info("Manual recent scan completed successfully")
+                return True
+            except Exception as e:
+                logger.error(f"Error during manual recent scan: {e}", exc_info=True)
+                if SENTRY_DSN:
+                    sentry_sdk.crons.capture_checkin(
+                        check_in_id=check_in_id,
+                        monitor_slug=monitor_slug,
+                        status=sentry_sdk.crons.MonitorStatus.ERROR,
+                    )
+                return False
 
     def trigger_incremental_scan(self):
         """Manually trigger an incremental scan"""
         logger.info("Manual incremental scan triggered via API")
-        try:
-            all_tickets = self.fetch_all_tickets(full_scan=False)
-            self.process_new_tickets(all_tickets)
-            logger.info("Manual incremental scan completed successfully")
-            return True
-        except Exception as e:
-            logger.error(f"Error during manual incremental scan: {e}", exc_info=True)
-            return False
+
+        # Acquire lock, wait if needed
+        with self._scan_lock:
+            logger.info("Lock acquired, starting incremental scan...")
+            try:
+                all_tickets = self.fetch_all_tickets(full_scan=False)
+                self.process_new_tickets(all_tickets)
+                logger.info("Manual incremental scan completed successfully")
+                return True
+            except Exception as e:
+                logger.error(f"Error during manual incremental scan: {e}", exc_info=True)
+                return False
 
     def trigger_events_fetch(self):
         """Manually trigger events fetch"""
         logger.info("Manual events fetch triggered via API")
-        try:
-            if SENTRY_DSN:
-                monitor_slug = 'shotgun-events-fetch'
-                check_in_id = sentry_sdk.crons.capture_checkin(
-                    monitor_slug=monitor_slug,
-                    status=sentry_sdk.crons.MonitorStatus.IN_PROGRESS,
-                )
 
-            events = self.fetch_events()
-            self.update_event_metrics(events)
-            self._mark_events_fetched()
+        # Acquire lock, wait if needed
+        with self._scan_lock:
+            logger.info("Lock acquired, starting events fetch...")
+            try:
+                if SENTRY_DSN:
+                    monitor_slug = 'shotgun-events-fetch'
+                    check_in_id = sentry_sdk.crons.capture_checkin(
+                        monitor_slug=monitor_slug,
+                        status=sentry_sdk.crons.MonitorStatus.IN_PROGRESS,
+                    )
 
-            if SENTRY_DSN:
-                sentry_sdk.crons.capture_checkin(
-                    check_in_id=check_in_id,
-                    monitor_slug=monitor_slug,
-                    status=sentry_sdk.crons.MonitorStatus.OK,
-                )
+                events = self.fetch_events()
+                self.update_event_metrics(events)
+                self._mark_events_fetched()
 
-            logger.info("Manual events fetch completed successfully")
-            return True
-        except Exception as e:
-            logger.error(f"Error during manual events fetch: {e}", exc_info=True)
-            if SENTRY_DSN:
-                sentry_sdk.crons.capture_checkin(
-                    check_in_id=check_in_id,
-                    monitor_slug=monitor_slug,
-                    status=sentry_sdk.crons.MonitorStatus.ERROR,
-                )
-            return False
+                if SENTRY_DSN:
+                    sentry_sdk.crons.capture_checkin(
+                        check_in_id=check_in_id,
+                        monitor_slug=monitor_slug,
+                        status=sentry_sdk.crons.MonitorStatus.OK,
+                    )
+
+                logger.info("Manual events fetch completed successfully")
+                return True
+            except Exception as e:
+                logger.error(f"Error during manual events fetch: {e}", exc_info=True)
+                if SENTRY_DSN:
+                    sentry_sdk.crons.capture_checkin(
+                        check_in_id=check_in_id,
+                        monitor_slug=monitor_slug,
+                        status=sentry_sdk.crons.MonitorStatus.ERROR,
+                    )
+                return False
 
 
 # Flask API endpoints
